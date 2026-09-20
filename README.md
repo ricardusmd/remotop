@@ -4,6 +4,7 @@
 
 It shows live remote sessions, client address, login age, TTY, matching TCP socket details, and the visible process/activity tree for each session.
 The detail pane also shows whether the client is local or remote, public-IP country, and best-effort client OS.
+Suspicious sessions can be terminated from inside the app with an explicit confirmation.
 
 ## Status
 
@@ -78,6 +79,7 @@ Keys:
 - `up/down` or `k/j` select session
 - `r` refresh now
 - `p` or `space` pause
+- `K` terminate selected session, then `y` to confirm
 
 ## What it can see
 
@@ -92,6 +94,7 @@ Default mode:
 - Client OS when it can be honestly inferred
 - Process tree and commands running under the session
 - TCP state and receive/send queue where visible
+- In-app termination for the selected visible process tree, subject to OS permissions
 
 Limitations:
 
@@ -99,6 +102,7 @@ Limitations:
 - Country lookup uses `ipwho.is` for public IP addresses; private/LAN and local IPs are never sent for lookup.
 - SSH does not normally expose the client OS, so this field is usually `unknown` for remote clients unless a future optional fingerprinting module is enabled.
 - macOS socket-to-process visibility is more limited without elevated privileges.
+- Termination sends `SIGTERM` to visible session processes. Run with `sudo` when terminating another user's/root-owned SSH session.
 - Full terminal content capture should be an explicit opt-in audit/recording feature, not a silent monitor.
 
 ## Homebrew Tap

@@ -8,6 +8,7 @@ import json
 import os
 import platform
 import re
+import signal
 import socket
 import subprocess
 import sys
@@ -17,7 +18,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-VERSION = "0.1.2"
+VERSION = "0.1.3"
 COUNTRY_CACHE: dict[str, str] = {}
 
 
@@ -443,6 +444,7 @@ class App:
         self.status = "starting"
         self.last_refresh = 0.0
         self.colors: dict[str, int] = {}
+        self.confirm_kill = False
 
     def run(self) -> None:
         curses.curs_set(0)
@@ -462,11 +464,24 @@ class App:
             self.draw()
             key = self.stdscr.getch()
             if key in (ord("q"), ord("Q"), 27):
+                if self.confirm_kill:
+                    self.confirm_kill = False
+                    self.status = "terminate cancelled"
+                    continue
                 break
+            if self.confirm_kill:
+                if key in (ord("y"), ord("Y")):
+                    self.terminate_selected()
+                elif key != -1:
+                    self.confirm_kill = False
+                    self.status = "terminate cancelled"
+                continue
             if key in (ord("p"), ord("P"), ord(" ")):
                 self.paused = not self.paused
             elif key in (ord("r"), ord("R")):
                 self.refresh_data()
+            elif key in (ord("K"),):
+                self.request_terminate()
             elif key in (curses.KEY_DOWN, ord("j")):
                 self.selected = min(max(0, len(self.sessions) - 1), self.selected + 1)
             elif key in (curses.KEY_UP, ord("k")):
@@ -480,6 +495,49 @@ class App:
         except Exception as exc:
             self.status = f"collector error: {exc}"
         self.last_refresh = time.monotonic()
+
+    def request_terminate(self) -> None:
+        if not self.sessions:
+            self.status = "no session selected"
+            return
+        pids = self.selected_pids()
+        if not pids:
+            self.status = "no visible process to terminate; try sudo"
+            return
+        self.confirm_kill = True
+        session = self.sessions[self.selected]
+        self.status = f"confirm terminate {session.user}@{session.tty}: press y"
+
+    def selected_pids(self) -> list[int]:
+        if not self.sessions:
+            return []
+        session = self.sessions[self.selected]
+        pids = {proc.pid for proc in session.processes}
+        if session.login_pid:
+            pids.add(session.login_pid)
+        return sorted(pid for pid in pids if pid and pid != os.getpid())
+
+    def terminate_selected(self) -> None:
+        pids = self.selected_pids()
+        self.confirm_kill = False
+        if not pids:
+            self.status = "no visible process to terminate"
+            return
+        failed: list[str] = []
+        for pid in sorted(pids, reverse=True):
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                continue
+            except PermissionError:
+                failed.append(str(pid))
+            except OSError as exc:
+                failed.append(f"{pid}:{exc}")
+        if failed:
+            self.status = f"terminate incomplete; denied {','.join(failed[:3])}"
+        else:
+            self.status = f"sent SIGTERM to {len(pids)} process(es)"
+        self.refresh_data()
 
     def c(self, name: str) -> int:
         return self.colors.get(name, 0)
@@ -578,7 +636,10 @@ class App:
 
     def draw_footer(self, y: int, width: int) -> None:
         self.add(y, 0, " " * width, self.c("blue") | curses.A_REVERSE)
-        self.add(y, 1, " q quit  up/down select  r refresh  p pause "[: width - 2], curses.A_REVERSE)
+        controls = " q quit  up/down select  r refresh  p pause  K terminate "
+        if self.confirm_kill:
+            controls = " confirm terminate selected session? y yes / any other key cancel "
+        self.add(y, 1, controls[: width - 2], curses.A_REVERSE)
         state = "PAUSED" if self.paused else self.status
         self.add(y, max(1, width - len(state) - 2), state[: width - 3], self.c("green") | curses.A_REVERSE)
 

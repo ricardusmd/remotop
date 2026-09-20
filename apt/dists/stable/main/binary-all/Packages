@@ -1,13 +1,13 @@
 Package: remotop
-Version: 0.1.2
+Version: 0.1.3
 Architecture: all
 Maintainer: Ricardo Tamayo <80552235+ricardusmd@users.noreply.github.com>
 Depends: python3
-Filename: pool/main/r/remotop/remotop_0.1.2_all.deb
-Size: 8570
-MD5sum: 5f01431129e47d26a9b8b4c2c6230446
-SHA1: 654a90168cfc1f7ef1a7d6a0f37bca730ec2601a
-SHA256: 4f20351829f3bfc0666136967dc091bfc8196ac1fd70233fdb3c560ad0b46100
+Filename: pool/main/r/remotop/remotop_0.1.3_all.deb
+Size: 9202
+MD5sum: cb68f710c08a7558f31893be6dd01695
+SHA1: 7e01ca13edd931951bb2a800c9947e1bb7ddd3be
+SHA256: 00e1ad7f63c684c27a3c47d1bda8de055039971c1662782be362a121ee371b57
 Section: admin
 Priority: optional
 Homepage: https://github.com/ricardusmd/remotop
