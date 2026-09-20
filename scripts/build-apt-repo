@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 set -eu
 
-version="${1:-0.1.0}"
+version="${1:-0.1.1}"
 repo_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 apt_root="${repo_dir}/apt"
 pool_dir="${apt_root}/pool/main/r/remotop"

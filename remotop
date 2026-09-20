@@ -14,7 +14,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-VERSION = "0.1.0"
+VERSION = "0.1.1"
 
 
 @dataclass(frozen=True)
@@ -181,6 +181,40 @@ def collect_who_sessions(resolve_hosts: bool) -> list[RemoteSession]:
     return sessions
 
 
+def collect_w_sessions(resolve_hosts: bool) -> list[RemoteSession]:
+    sessions: list[RemoteSession] = []
+    seen: set[tuple[str, str, str]] = set()
+    for line in run_command(["w", "-h"]).splitlines():
+        parsed = parse_w_line(line)
+        if not parsed:
+            continue
+        user, tty, idle, host = parsed
+        key = (user, tty, host)
+        if key in seen:
+            continue
+        seen.add(key)
+        sessions.append(RemoteSession(user, normalize_tty(tty), None, idle, resolve_host(host, resolve_hosts), host, None))
+    return sessions
+
+
+def parse_w_line(line: str) -> tuple[str, str, str, str] | None:
+    parts = line.split()
+    if len(parts) < 5:
+        return None
+    user = parts[0]
+    if parts[1].startswith(("pts/", "tty")):
+        tty = parts[1]
+        host = parts[2]
+        idle = parts[4] if len(parts) > 4 else "?"
+    else:
+        tty = "notty"
+        host = parts[1]
+        idle = parts[3] if len(parts) > 3 else "?"
+    if host in {"-", "?"}:
+        return None
+    return user, tty, idle, host
+
+
 def collect_processes() -> list[ProcessInfo]:
     output = run_command(["ps", "-axo", "pid=,ppid=,user=,tty=,stat=,lstart=,command="], timeout=2.0)
     processes: list[ProcessInfo] = []
@@ -244,16 +278,25 @@ def collect_tcp() -> list[TcpInfo]:
 def infer_sessions_from_sshd(processes: list[ProcessInfo], tcp: list[TcpInfo], resolve_hosts: bool) -> list[RemoteSession]:
     sessions: list[RemoteSession] = []
     for proc in processes:
-        if "sshd:" not in proc.command or "@" not in proc.command:
+        if not is_sshd_session_command(proc.command):
             continue
-        match = re.search(r"sshd:\s+([^@\s]+)@", proc.command)
+        match = re.search(r"sshd(?:-session)?:\s+([^@\s\[]+)(?:@(\S+))?", proc.command)
         user = match.group(1) if match else proc.user
+        tty = normalize_tty(match.group(2)) if match and match.group(2) else proc.tty
         linked = [conn for conn in tcp if conn.pid == proc.pid]
         remote_host = "-"
         if linked:
             remote_host, _ = parse_endpoint(linked[0].remote)
-        sessions.append(RemoteSession(user, proc.tty, None, "?", resolve_host(remote_host, resolve_hosts), remote_host, proc.pid))
+        sessions.append(RemoteSession(user, tty, None, "?", resolve_host(remote_host, resolve_hosts), remote_host, proc.pid))
     return sessions
+
+
+def is_sshd_session_command(command: str) -> bool:
+    return (
+        ("sshd:" in command or "sshd-session:" in command)
+        and "[listener]" not in command
+        and "@" in command
+    )
 
 
 def attach_processes(sessions: list[RemoteSession], processes: list[ProcessInfo]) -> None:
@@ -289,6 +332,8 @@ def attach_tcp(sessions: list[RemoteSession], tcp: list[TcpInfo]) -> None:
                 matches.append(conn)
             elif session.login_pid and conn.pid == session.login_pid:
                 matches.append(conn)
+            elif session.from_ip and session.from_ip in {remote_host, _local_host}:
+                matches.append(conn)
         session.tcp = matches
 
 
@@ -296,6 +341,8 @@ def collect_sessions(resolve_hosts: bool) -> list[RemoteSession]:
     processes = collect_processes()
     tcp = collect_tcp()
     sessions = collect_who_sessions(resolve_hosts)
+    if not sessions:
+        sessions = collect_w_sessions(resolve_hosts)
     if not sessions:
         sessions = infer_sessions_from_sshd(processes, tcp, resolve_hosts)
     attach_processes(sessions, processes)
@@ -478,8 +525,11 @@ def main() -> int:
     if not sys.stdin.isatty() or not sys.stdout.isatty():
         print("remotop needs an interactive terminal (TTY).", file=sys.stderr)
         return 2
-    curses.wrapper(lambda stdscr: App(stdscr, max(0.25, args.interval), not args.no_resolve).run())
-    return 0
+    try:
+        curses.wrapper(lambda stdscr: App(stdscr, max(0.25, args.interval), not args.no_resolve).run())
+        return 0
+    except KeyboardInterrupt:
+        return 130
 
 
 if __name__ == "__main__":
