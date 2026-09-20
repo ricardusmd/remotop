@@ -8,6 +8,13 @@ It shows live remote sessions, client address, login age, TTY, matching TCP sock
 
 This is an early MVP. It intentionally does **not** record keystrokes or terminal contents by default. The default view uses normal system accounting and process/socket metadata.
 
+## Install with Homebrew
+
+```bash
+brew tap ricardusmd/remotop
+brew install remotop
+```
+
 ## Install locally as `remotop`
 
 No virtualenv is required for normal local use:
@@ -80,19 +87,6 @@ Limitations:
 - macOS socket-to-process visibility is more limited without elevated privileges.
 - Full terminal content capture should be an explicit opt-in audit/recording feature, not a silent monitor.
 
-## Packaging Roadmap
+## Homebrew Tap
 
-Homebrew tap layout is included in `Formula/remotop.rb`.
-
-Planned release steps:
-
-1. Publish `ricardusmd/remotop`.
-2. Tag `v0.1.0`.
-3. Generate the release tarball SHA256.
-4. Publish `ricardusmd/homebrew-remotop` with `Formula/remotop.rb`.
-5. Install with:
-
-```bash
-brew tap ricardusmd/remotop
-brew install remotop
-```
+The tap repository is `ricardusmd/homebrew-remotop`.
