@@ -1,0 +1,486 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import curses
+import os
+import platform
+import re
+import socket
+import subprocess
+import sys
+import time
+from collections import defaultdict
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+
+VERSION = "0.1.0"
+
+
+@dataclass(frozen=True)
+class ProcessInfo:
+    pid: int
+    ppid: int
+    user: str
+    tty: str
+    stat: str
+    started: str
+    command: str
+
+
+@dataclass(frozen=True)
+class TcpInfo:
+    protocol: str
+    local: str
+    remote: str
+    state: str
+    recv_q: int | None = None
+    send_q: int | None = None
+    pid: int | None = None
+
+
+@dataclass
+class RemoteSession:
+    user: str
+    tty: str
+    login_at: datetime | None
+    idle: str
+    from_host: str
+    from_ip: str
+    login_pid: int | None
+    tcp: list[TcpInfo] = field(default_factory=list)
+    processes: list[ProcessInfo] = field(default_factory=list)
+
+
+def run_command(argv: list[str], timeout: float = 1.5) -> str:
+    try:
+        return subprocess.check_output(argv, stderr=subprocess.DEVNULL, text=True, timeout=timeout)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def safe_int(value: str | None) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
+
+
+def normalize_tty(tty: str) -> str:
+    if tty in {"?", "??"}:
+        return "?"
+    return tty.removeprefix("/dev/")
+
+
+def parse_endpoint(value: str) -> tuple[str, int | None]:
+    value = value.strip()
+    if not value:
+        return "", None
+    if value.startswith("[") and "]:" in value:
+        host, port = value.rsplit("]:", 1)
+        return host[1:], safe_int(port)
+    if value.count(":") == 1:
+        host, port = value.rsplit(":", 1)
+        return host, safe_int(port)
+    match = re.match(r"(.+)\.(\d+)$", value)
+    if match:
+        return match.group(1), safe_int(match.group(2))
+    return value, None
+
+
+def resolve_host(host: str, enabled: bool) -> str:
+    if not enabled or not host or host in {"-", "?"}:
+        return host
+    try:
+        return socket.gethostbyaddr(host)[0]
+    except OSError:
+        return host
+
+
+def format_age(started: datetime | None) -> str:
+    if started is None:
+        return "?"
+    now = datetime.now(timezone.utc)
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=timezone.utc)
+    seconds = max(0, int((now - started).total_seconds()))
+    days, seconds = divmod(seconds, 86400)
+    hours, seconds = divmod(seconds, 3600)
+    minutes, _ = divmod(seconds, 60)
+    if days:
+        return f"{days}d{hours:02}h"
+    if hours:
+        return f"{hours}h{minutes:02}m"
+    return f"{minutes}m"
+
+
+def compact_command(command: str, max_len: int = 100) -> str:
+    command = " ".join(command.split())
+    if len(command) <= max_len:
+        return command
+    return command[: max_len - 1] + "..."
+
+
+def parse_who_datetime(parts: list[str]) -> datetime | None:
+    if len(parts) < 2:
+        return None
+    raw = f"{parts[0]} {parts[1]}"
+    now = datetime.now()
+    for fmt in ("%Y-%m-%d %H:%M", "%b %d %H:%M"):
+        try:
+            parsed = datetime.strptime(raw, fmt)
+            if "%Y" not in fmt:
+                parsed = parsed.replace(year=now.year)
+            return parsed.replace(tzinfo=timezone.utc).astimezone()
+        except ValueError:
+            continue
+    return None
+
+
+def parse_who_line(line: str) -> tuple[str, str, datetime | None, str, int | None, str | None] | None:
+    parts = line.split()
+    if len(parts) < 3:
+        return None
+    user = parts[0]
+    tty = parts[1]
+    login_at = parse_who_datetime(parts[2:4])
+    idle = "?"
+    pid: int | None = None
+    host: str | None = None
+    for part in parts[4:]:
+        if part.startswith("(") and part.endswith(")"):
+            host = part[1:-1]
+        elif part in {".", "old"} or re.match(r"^\d+[:.]\d+$", part):
+            idle = part
+        elif part.isdigit():
+            pid = int(part)
+    return user, tty, login_at, idle, pid, host
+
+
+def collect_who_sessions(resolve_hosts: bool) -> list[RemoteSession]:
+    sessions: list[RemoteSession] = []
+    for line in run_command(["who", "-u"]).splitlines():
+        parsed = parse_who_line(line)
+        if not parsed:
+            continue
+        user, tty, login_at, idle, pid, host = parsed
+        from_ip = host or "-"
+        sessions.append(
+            RemoteSession(
+                user=user,
+                tty=normalize_tty(tty),
+                login_at=login_at,
+                idle=idle,
+                from_host=resolve_host(from_ip, resolve_hosts),
+                from_ip=from_ip,
+                login_pid=pid,
+            )
+        )
+    return sessions
+
+
+def collect_processes() -> list[ProcessInfo]:
+    output = run_command(["ps", "-axo", "pid=,ppid=,user=,tty=,stat=,lstart=,command="], timeout=2.0)
+    processes: list[ProcessInfo] = []
+    for line in output.splitlines():
+        match = re.match(
+            r"^\s*(\d+)\s+(\d+)\s+(\S+)\s+(\S+)\s+(\S+)\s+"
+            r"(\S+\s+\S+\s+\d+\s+\d+:\d+:\d+\s+\d+)\s+(.*)$",
+            line,
+        )
+        if not match:
+            continue
+        processes.append(
+            ProcessInfo(
+                pid=int(match.group(1)),
+                ppid=int(match.group(2)),
+                user=match.group(3),
+                tty=normalize_tty(match.group(4)),
+                stat=match.group(5),
+                started=match.group(6),
+                command=match.group(7),
+            )
+        )
+    return processes
+
+
+def parse_ss(output: str) -> list[TcpInfo]:
+    rows: list[TcpInfo] = []
+    for line in output.splitlines()[1:]:
+        parts = line.split()
+        if len(parts) < 5:
+            continue
+        pid = None
+        match = re.search(r"pid=(\d+)", line)
+        if match:
+            pid = int(match.group(1))
+        rows.append(TcpInfo("tcp", parts[3], parts[4], parts[0], safe_int(parts[1]), safe_int(parts[2]), pid))
+    return rows
+
+
+def parse_netstat(output: str) -> list[TcpInfo]:
+    rows: list[TcpInfo] = []
+    for line in output.splitlines():
+        parts = line.split()
+        if not parts or not parts[0].startswith("tcp") or len(parts) < 5:
+            continue
+        rows.append(TcpInfo(parts[0], parts[3], parts[4], parts[5] if len(parts) > 5 else "?", safe_int(parts[1]), safe_int(parts[2])))
+    return rows
+
+
+def collect_tcp() -> list[TcpInfo]:
+    if platform.system() == "Linux":
+        output = run_command(["ss", "-tnp"], timeout=1.5)
+        if output:
+            return parse_ss(output)
+    output = run_command(["netstat", "-anv", "-p", "tcp"], timeout=2.0)
+    if not output:
+        output = run_command(["netstat", "-ant"], timeout=2.0)
+    return parse_netstat(output)
+
+
+def infer_sessions_from_sshd(processes: list[ProcessInfo], tcp: list[TcpInfo], resolve_hosts: bool) -> list[RemoteSession]:
+    sessions: list[RemoteSession] = []
+    for proc in processes:
+        if "sshd:" not in proc.command or "@" not in proc.command:
+            continue
+        match = re.search(r"sshd:\s+([^@\s]+)@", proc.command)
+        user = match.group(1) if match else proc.user
+        linked = [conn for conn in tcp if conn.pid == proc.pid]
+        remote_host = "-"
+        if linked:
+            remote_host, _ = parse_endpoint(linked[0].remote)
+        sessions.append(RemoteSession(user, proc.tty, None, "?", resolve_host(remote_host, resolve_hosts), remote_host, proc.pid))
+    return sessions
+
+
+def attach_processes(sessions: list[RemoteSession], processes: list[ProcessInfo]) -> None:
+    by_parent: dict[int, list[ProcessInfo]] = defaultdict(list)
+    by_tty: dict[str, list[ProcessInfo]] = defaultdict(list)
+    by_pid = {proc.pid: proc for proc in processes}
+    for proc in processes:
+        by_parent[proc.ppid].append(proc)
+        by_tty[proc.tty].append(proc)
+    for session in sessions:
+        found: dict[int, ProcessInfo] = {}
+        if session.login_pid and session.login_pid in by_pid:
+            stack = [session.login_pid]
+            while stack:
+                pid = stack.pop()
+                proc = by_pid.get(pid)
+                if not proc or pid in found:
+                    continue
+                found[pid] = proc
+                stack.extend(child.pid for child in by_parent.get(pid, []))
+        for proc in by_tty.get(session.tty, []):
+            found.setdefault(proc.pid, proc)
+        session.processes = sorted(found.values(), key=lambda p: (p.ppid, p.pid))
+
+
+def attach_tcp(sessions: list[RemoteSession], tcp: list[TcpInfo]) -> None:
+    for session in sessions:
+        matches: list[TcpInfo] = []
+        for conn in tcp:
+            remote_host, _ = parse_endpoint(conn.remote)
+            _local_host, local_port = parse_endpoint(conn.local)
+            if local_port == 22 and remote_host in {session.from_ip, session.from_host}:
+                matches.append(conn)
+            elif session.login_pid and conn.pid == session.login_pid:
+                matches.append(conn)
+        session.tcp = matches
+
+
+def collect_sessions(resolve_hosts: bool) -> list[RemoteSession]:
+    processes = collect_processes()
+    tcp = collect_tcp()
+    sessions = collect_who_sessions(resolve_hosts)
+    if not sessions:
+        sessions = infer_sessions_from_sshd(processes, tcp, resolve_hosts)
+    attach_processes(sessions, processes)
+    attach_tcp(sessions, tcp)
+    return sorted(sessions, key=lambda s: (s.user, s.tty, s.from_ip))
+
+
+def is_privileged() -> bool:
+    return hasattr(os, "geteuid") and os.geteuid() == 0
+
+
+class App:
+    def __init__(self, stdscr, interval: float, resolve_hosts: bool) -> None:
+        self.stdscr = stdscr
+        self.interval = interval
+        self.resolve_hosts = resolve_hosts
+        self.sessions: list[RemoteSession] = []
+        self.selected = 0
+        self.paused = False
+        self.status = "starting"
+        self.last_refresh = 0.0
+        self.colors: dict[str, int] = {}
+
+    def run(self) -> None:
+        curses.curs_set(0)
+        curses.use_default_colors()
+        curses.start_color()
+        for idx, (name, color) in enumerate(
+            [("cyan", curses.COLOR_CYAN), ("green", curses.COLOR_GREEN), ("yellow", curses.COLOR_YELLOW), ("red", curses.COLOR_RED), ("blue", curses.COLOR_BLUE), ("dim", curses.COLOR_BLACK)],
+            1,
+        ):
+            curses.init_pair(idx, color, -1)
+            self.colors[name] = curses.color_pair(idx)
+        self.stdscr.nodelay(True)
+        self.stdscr.timeout(100)
+        while True:
+            if not self.paused and time.monotonic() - self.last_refresh >= self.interval:
+                self.refresh_data()
+            self.draw()
+            key = self.stdscr.getch()
+            if key in (ord("q"), ord("Q"), 27):
+                break
+            if key in (ord("p"), ord("P"), ord(" ")):
+                self.paused = not self.paused
+            elif key in (ord("r"), ord("R")):
+                self.refresh_data()
+            elif key in (curses.KEY_DOWN, ord("j")):
+                self.selected = min(max(0, len(self.sessions) - 1), self.selected + 1)
+            elif key in (curses.KEY_UP, ord("k")):
+                self.selected = max(0, self.selected - 1)
+
+    def refresh_data(self) -> None:
+        try:
+            self.sessions = collect_sessions(self.resolve_hosts)
+            self.selected = min(self.selected, max(0, len(self.sessions) - 1))
+            self.status = f"updated {datetime.now().strftime('%H:%M:%S')}"
+        except Exception as exc:
+            self.status = f"collector error: {exc}"
+        self.last_refresh = time.monotonic()
+
+    def c(self, name: str) -> int:
+        return self.colors.get(name, 0)
+
+    def draw(self) -> None:
+        self.stdscr.erase()
+        height, width = self.stdscr.getmaxyx()
+        if height < 18 or width < 80:
+            self.add(0, 0, "remotop needs at least 80x18", self.c("red") | curses.A_BOLD)
+            self.stdscr.refresh()
+            return
+        left_w = max(45, min(width - 34, int(width * 0.56)))
+        right_x = left_w + 1
+        self.draw_header(width)
+        self.draw_box(2, 0, height - 5, left_w, "Remote Sessions")
+        self.draw_sessions(3, 1, height - 7, left_w - 2)
+        self.draw_box(2, right_x, height - 5, width - right_x, "Session Detail")
+        self.draw_detail(3, right_x + 1, height - 7, width - right_x - 2)
+        self.draw_footer(height - 2, width)
+        self.stdscr.refresh()
+
+    def draw_header(self, width: int) -> None:
+        self.add(0, 0, " " * width, self.c("blue") | curses.A_REVERSE)
+        self.add(0, 1, f" remotop v{VERSION} ", self.c("cyan") | curses.A_BOLD | curses.A_REVERSE)
+        self.add(0, 18, " inbound remote session monitor ", curses.A_REVERSE)
+        count = f"{len(self.sessions)} session{'s' if len(self.sessions) != 1 else ''}"
+        self.add(0, max(0, width - len(count) - 2), count, self.c("green") | curses.A_BOLD | curses.A_REVERSE)
+        if not is_privileged():
+            self.add(1, 1, "limited view: run with sudo for more process/socket detail"[: width - 2], self.c("yellow"))
+
+    def draw_sessions(self, y: int, x: int, rows: int, width: int) -> None:
+        user_w, tty_w, age_w, proc_w = 8, 8, 6, 4
+        client_w = max(8, width - (user_w + tty_w + age_w + proc_w + 4))
+        cursor = x
+        for label, size in [("USER", user_w), ("TTY", tty_w), ("CLIENT", client_w), ("AGE", age_w), ("PROC", proc_w)]:
+            self.add(y, cursor, label[:size].ljust(size), self.c("cyan") | curses.A_BOLD)
+            cursor += size + 1
+        for idx, session in enumerate(self.sessions[: rows - 2]):
+            values = [
+                (session.user, user_w),
+                (session.tty, tty_w),
+                (session.from_ip or session.from_host, client_w),
+                (format_age(session.login_at), age_w),
+                (str(len(session.processes)), proc_w),
+            ]
+            line = "".join(value[:size].ljust(size) + " " for value, size in values)
+            self.add(y + idx + 1, x, line[:width].ljust(width), curses.A_REVERSE if idx == self.selected else 0)
+        if not self.sessions:
+            self.add(y + 2, x + 2, "No inbound remote terminal sessions detected.", self.c("dim"))
+
+    def draw_detail(self, y: int, x: int, rows: int, width: int) -> None:
+        if not self.sessions:
+            self.add(y, x, "Waiting for SSH/remote sessions...", self.c("dim"))
+            return
+        session = self.sessions[self.selected]
+        row = y
+        for label, value in [
+            ("User", session.user),
+            ("TTY", session.tty),
+            ("Client", session.from_host),
+            ("IP", session.from_ip),
+            ("Login age", format_age(session.login_at)),
+            ("Login PID", str(session.login_pid or "?")),
+            ("Idle", session.idle),
+        ]:
+            self.add(row, x, f"{label:>10} ", self.c("cyan"))
+            self.add(row, x + 11, value[: max(0, width - 11)])
+            row += 1
+        row += 1
+        self.add(row, x, "TCP", self.c("green") | curses.A_BOLD)
+        row += 1
+        if session.tcp:
+            for conn in session.tcp[:4]:
+                q = f" rq/sq={conn.recv_q or 0}/{conn.send_q or 0}" if conn.recv_q is not None or conn.send_q is not None else ""
+                self.add(row, x, f"{conn.state:12} {conn.local} <- {conn.remote}{q}"[:width])
+                row += 1
+        else:
+            self.add(row, x, "No matching TCP socket visible.", self.c("dim"))
+            row += 1
+        row += 1
+        self.add(row, x, "Activity", self.c("green") | curses.A_BOLD)
+        row += 1
+        for proc in session.processes[: max(1, y + rows - row)]:
+            marker = "*" if proc.pid == session.login_pid else " "
+            cmd = compact_command(proc.command, max(20, width - 29))
+            color = self.c("yellow") if "sudo" in proc.command or " su " in f" {proc.command} " else 0
+            self.add(row, x, f"{marker} {proc.pid:<7} {proc.stat:<5} {proc.user:<10} {cmd}"[:width], color)
+            row += 1
+            if row >= y + rows:
+                break
+        if not session.processes:
+            self.add(row, x, "No process tree visible for this session.", self.c("dim"))
+
+    def draw_footer(self, y: int, width: int) -> None:
+        self.add(y, 0, " " * width, self.c("blue") | curses.A_REVERSE)
+        self.add(y, 1, " q quit  up/down select  r refresh  p pause "[: width - 2], curses.A_REVERSE)
+        state = "PAUSED" if self.paused else self.status
+        self.add(y, max(1, width - len(state) - 2), state[: width - 3], self.c("green") | curses.A_REVERSE)
+
+    def draw_box(self, y: int, x: int, h: int, w: int, title: str) -> None:
+        self.add(y, x, "+" + "-" * (w - 2) + "+", self.c("cyan"))
+        for row in range(y + 1, y + h - 1):
+            self.add(row, x, "|", self.c("cyan"))
+            self.add(row, x + w - 1, "|", self.c("cyan"))
+        self.add(y + h - 1, x, "+" + "-" * (w - 2) + "+", self.c("cyan"))
+        self.add(y, x + 2, f" {title} ", self.c("green") | curses.A_BOLD)
+
+    def add(self, y: int, x: int, text: str, attr: int = 0) -> None:
+        try:
+            self.stdscr.addstr(y, x, text, attr)
+        except curses.error:
+            pass
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Live terminal monitor for inbound SSH and remote shell sessions.")
+    parser.add_argument("-i", "--interval", type=float, default=1.0, help="refresh interval in seconds")
+    parser.add_argument("--no-resolve", action="store_true", help="do not attempt client hostname lookups")
+    parser.add_argument("--version", action="version", version=f"remotop {VERSION}")
+    args = parser.parse_args()
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        print("remotop needs an interactive terminal (TTY).", file=sys.stderr)
+        return 2
+    curses.wrapper(lambda stdscr: App(stdscr, max(0.25, args.interval), not args.no_resolve).run())
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
