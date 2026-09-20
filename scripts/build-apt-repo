@@ -1,0 +1,23 @@
+#!/usr/bin/env sh
+set -eu
+
+version="${1:-0.1.0}"
+repo_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+apt_root="${repo_dir}/apt"
+pool_dir="${apt_root}/pool/main/r/remotop"
+binary_dir="${apt_root}/dists/stable/main/binary-all"
+deb="${repo_dir}/dist/remotop_${version}_all.deb"
+
+if [ ! -f "$deb" ]; then
+  "${repo_dir}/scripts/package-deb" "$version" >/dev/null
+fi
+
+mkdir -p "$pool_dir" "$binary_dir"
+install -m 0644 "$deb" "${pool_dir}/remotop_${version}_all.deb"
+
+cd "$apt_root"
+dpkg-scanpackages --arch all pool > dists/stable/main/binary-all/Packages
+gzip -k -f dists/stable/main/binary-all/Packages
+apt-ftparchive release dists/stable > dists/stable/Release
+
+printf '%s\n' "$apt_root"

@@ -1,0 +1,31 @@
+#!/usr/bin/env sh
+set -eu
+
+version="${1:-0.1.0}"
+repo_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+build_root="${repo_dir}/dist/deb-build"
+pkg_root="${build_root}/remotop_${version}_all"
+deb="${repo_dir}/dist/remotop_${version}_all.deb"
+
+mkdir -p "${pkg_root}/DEBIAN" "${pkg_root}/usr/bin" "${pkg_root}/usr/share/doc/remotop"
+install -m 0755 "${repo_dir}/standalone/remotop" "${pkg_root}/usr/bin/remotop"
+install -m 0644 "${repo_dir}/README.md" "${pkg_root}/usr/share/doc/remotop/README.md"
+install -m 0644 "${repo_dir}/LICENSE" "${pkg_root}/usr/share/doc/remotop/copyright"
+
+cat > "${pkg_root}/DEBIAN/control" <<EOF
+Package: remotop
+Version: ${version}
+Section: admin
+Priority: optional
+Architecture: all
+Depends: python3
+Maintainer: Ricardo Tamayo <80552235+ricardusmd@users.noreply.github.com>
+Homepage: https://github.com/ricardusmd/remotop
+Description: btop-style monitor for inbound SSH and remote terminal sessions
+ remotop is a terminal monitor for inbound SSH and remote shell sessions.
+ It shows user, TTY, client address, visible TCP socket state, and process
+ activity for each session.
+EOF
+
+dpkg-deb --build --root-owner-group "${pkg_root}" "${deb}"
+printf '%s\n' "${deb}"

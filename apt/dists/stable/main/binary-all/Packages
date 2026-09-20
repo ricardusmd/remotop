@@ -1,0 +1,18 @@
+Package: remotop
+Version: 0.1.0
+Architecture: all
+Maintainer: Ricardo Tamayo <80552235+ricardusmd@users.noreply.github.com>
+Depends: python3
+Filename: pool/main/r/remotop/remotop_0.1.0_all.deb
+Size: 7480
+MD5sum: 8b5fe6b3aaeeaa9fcd647be8b9885514
+SHA1: f380b2364db1db6041664c943a80e7e83fc5a957
+SHA256: ff7af7474f10c70a6c3e9b0e447f23b19b41d0a4b85f8502a870f385817b7c29
+Section: admin
+Priority: optional
+Homepage: https://github.com/ricardusmd/remotop
+Description: btop-style monitor for inbound SSH and remote terminal sessions
+ remotop is a terminal monitor for inbound SSH and remote shell sessions.
+ It shows user, TTY, client address, visible TCP socket state, and process
+ activity for each session.
+
