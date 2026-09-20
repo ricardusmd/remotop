@@ -20,7 +20,7 @@ brew install remotop
 ## Install on Ubuntu with APT
 
 ```bash
-echo "deb [trusted=yes arch=all] https://raw.githubusercontent.com/ricardusmd/remotop/43e11166a8b1be7feec1196c9441bce9d0b216fe/apt stable main" | sudo tee /etc/apt/sources.list.d/remotop.list
+echo "deb [trusted=yes arch=all] https://raw.githubusercontent.com/ricardusmd/remotop/18c2d2829122e602873b1688b8c108e2126ddf38/apt stable main" | sudo tee /etc/apt/sources.list.d/remotop.list
 sudo apt update
 sudo apt install remotop
 ```
