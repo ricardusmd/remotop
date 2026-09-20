@@ -3,6 +3,7 @@
 `remotop` is a btop-style terminal monitor for inbound SSH and remote shell sessions on Linux and macOS.
 
 It shows live remote sessions, client address, login age, TTY, matching TCP socket details, and the visible process/activity tree for each session.
+The detail pane also shows whether the client is local or remote, public-IP country, and best-effort client OS.
 
 ## Status
 
@@ -18,7 +19,7 @@ brew install remotop
 ## Install on Ubuntu with APT
 
 ```bash
-echo "deb [trusted=yes arch=all] https://raw.githubusercontent.com/ricardusmd/remotop/23cc4c10c5bd423f9a05a1ac572ff4a1eb2c41e5/apt stable main" | sudo tee /etc/apt/sources.list.d/remotop.list
+echo "deb [trusted=yes arch=all] https://raw.githubusercontent.com/ricardusmd/remotop/main/apt stable main" | sudo tee /etc/apt/sources.list.d/remotop.list
 sudo apt update
 sudo apt install remotop
 ```
@@ -86,12 +87,17 @@ Default mode:
 - Fallback SSH session inference from `sshd` processes
 - Source host/IP when exposed by the OS login database
 - TTY and login PID where available
+- Locality: local, remote LAN, or remote public
+- Country for public IP addresses
+- Client OS when it can be honestly inferred
 - Process tree and commands running under the session
 - TCP state and receive/send queue where visible
 
 Limitations:
 
 - Per-session byte counters are platform-specific and not always exposed without kernel tracing or packet accounting.
+- Country lookup uses `ipwho.is` for public IP addresses; private/LAN and local IPs are never sent for lookup.
+- SSH does not normally expose the client OS, so this field is usually `unknown` for remote clients unless a future optional fingerprinting module is enabled.
 - macOS socket-to-process visibility is more limited without elevated privileges.
 - Full terminal content capture should be an explicit opt-in audit/recording feature, not a silent monitor.
 

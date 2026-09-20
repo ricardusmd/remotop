@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import argparse
 import curses
+import ipaddress
+import json
 import os
 import platform
 import re
@@ -10,11 +12,13 @@ import socket
 import subprocess
 import sys
 import time
+import urllib.request
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-VERSION = "0.1.1"
+VERSION = "0.1.2"
+COUNTRY_CACHE: dict[str, str] = {}
 
 
 @dataclass(frozen=True)
@@ -48,6 +52,9 @@ class RemoteSession:
     from_host: str
     from_ip: str
     login_pid: int | None
+    locality: str = "unknown"
+    country: str = "unknown"
+    client_os: str = "unknown"
     tcp: list[TcpInfo] = field(default_factory=list)
     processes: list[ProcessInfo] = field(default_factory=list)
 
@@ -337,6 +344,76 @@ def attach_tcp(sessions: list[RemoteSession], tcp: list[TcpInfo]) -> None:
         session.tcp = matches
 
 
+def enrich_sessions(sessions: list[RemoteSession]) -> None:
+    local_ips = get_local_ips()
+    for session in sessions:
+        session.locality = classify_locality(session.from_ip, local_ips)
+        session.country = lookup_country(session.from_ip)
+        session.client_os = infer_client_os(session.from_ip, local_ips)
+
+
+def get_local_ips() -> set[str]:
+    ips = {"127.0.0.1", "::1"}
+    try:
+        hostname = socket.gethostname()
+        for family, _, _, _, sockaddr in socket.getaddrinfo(hostname, None):
+            if family in {socket.AF_INET, socket.AF_INET6}:
+                ips.add(sockaddr[0].split("%", 1)[0])
+    except OSError:
+        pass
+    for token in run_command(["hostname", "-I"], timeout=0.5).split():
+        ips.add(token)
+    return ips
+
+
+def parse_ip(value: str):
+    if not value or value in {"-", "?"}:
+        return None
+    try:
+        return ipaddress.ip_address(value)
+    except ValueError:
+        return None
+
+
+def classify_locality(value: str, local_ips: set[str]) -> str:
+    ip = parse_ip(value)
+    if ip is None:
+        return "unknown"
+    if str(ip) in local_ips or ip.is_loopback:
+        return "local"
+    if ip.is_private or ip.is_link_local:
+        return "remote (LAN)"
+    return "remote (public)"
+
+
+def lookup_country(value: str) -> str:
+    ip = parse_ip(value)
+    if ip is None:
+        return "unknown"
+    if ip.is_loopback:
+        return "local"
+    if ip.is_private or ip.is_link_local:
+        return "private/LAN"
+    key = str(ip)
+    if key in COUNTRY_CACHE:
+        return COUNTRY_CACHE[key]
+    try:
+        with urllib.request.urlopen(f"https://ipwho.is/{key}", timeout=0.8) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        country = payload.get("country") if payload.get("success", True) else None
+    except Exception:
+        country = None
+    COUNTRY_CACHE[key] = country or "unknown"
+    return COUNTRY_CACHE[key]
+
+
+def infer_client_os(value: str, local_ips: set[str]) -> str:
+    ip = parse_ip(value)
+    if ip and (str(ip) in local_ips or ip.is_loopback):
+        return platform.system() or "local"
+    return "unknown"
+
+
 def collect_sessions(resolve_hosts: bool) -> list[RemoteSession]:
     processes = collect_processes()
     tcp = collect_tcp()
@@ -347,6 +424,7 @@ def collect_sessions(resolve_hosts: bool) -> list[RemoteSession]:
         sessions = infer_sessions_from_sshd(processes, tcp, resolve_hosts)
     attach_processes(sessions, processes)
     attach_tcp(sessions, tcp)
+    enrich_sessions(sessions)
     return sorted(sessions, key=lambda s: (s.user, s.tty, s.from_ip))
 
 
@@ -463,6 +541,9 @@ class App:
             ("TTY", session.tty),
             ("Client", session.from_host),
             ("IP", session.from_ip),
+            ("Locality", session.locality),
+            ("Country", session.country),
+            ("Client OS", session.client_os),
             ("Login age", format_age(session.login_at)),
             ("Login PID", str(session.login_pid or "?")),
             ("Idle", session.idle),

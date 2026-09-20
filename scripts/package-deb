@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 set -eu
 
-version="${1:-0.1.1}"
+version="${1:-0.1.2}"
 repo_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 build_root="${repo_dir}/dist/deb-build"
 pkg_root="${build_root}/remotop_${version}_all"
